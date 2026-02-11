@@ -1,0 +1,83 @@
+name: CI/CD – GKE Deployment
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  PROJECT_ID: devops-gke-task
+  REGION: us-central1
+  REPO_NAME: hello-world-repo
+  IMAGE_NAME: hello-world
+  CLUSTER_NAME: hello-world-gke
+  ARTIFACT_REPO: ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'  # Required for Workload Identity Federation
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud (WIF)
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: 'projects/250621052851/locations/global/workloadIdentityPools/github/providers/github-actions-provider'
+        service_account: 'github-actions-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ env.PROJECT_ID }}
+
+    - name: Set short image tag
+      run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+    - name: Configure Docker auth
+      run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }} \
+          -t ${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:latest ./app
+
+    - name: Trivy vulnerability scan
+      uses: aquasecurity/trivy-action@0.24.0
+      with:
+        image-ref: ${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        severity: 'CRITICAL,HIGH'
+
+    - name: Push Docker images
+      run: |
+        docker push ${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
+        docker push ${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:latest
+
+    - name: Get GKE credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ env.CLUSTER_NAME }}
+        location: ${{ env.REGION }}
+        project_id: ${{ env.PROJECT_ID }}
+
+    - name: Deploy to GKE with Helm
+      run: |
+        helm upgrade --install hello-world ./helm/hello-world \
+          --namespace default \
+          --create-namespace \
+          --set image.repository=${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }} \
+          --set image.tag=${{ env.SHORT_SHA }} \
+          --wait
+
+    - name: Verify deployment
+      run: |
+        kubectl rollout status deployment/hello-world -n default --timeout=120s
+        echo "✅ Application deployed successfully!"
+        echo "🌐 Access your app at:"
+        kubectl get ingress hello-world -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
