@@ -1,0 +1,22 @@
+replicaCount: 2
+
+image:
+  repository: us-central1-docker.pkg.dev/devops-gke-task/hello-world-repo/hello-world
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "hello-world-ip"
+  hosts:
+    - host: ""
+      paths:
+        - path: /*
+          pathType: ImplementationSpecific
